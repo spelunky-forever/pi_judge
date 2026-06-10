@@ -678,7 +678,7 @@ def _main_impl(args, data_cache):
             tty_end_task('System', 'PASS')
 
             for pi_name, pi_timeout in PI_CASES:
-                target_proj_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'implementation', pi_name))
+                target_proj_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'implementation', pi_name))
                 config['project_dir'] = target_proj_dir
                 
                 if args.no_flash:

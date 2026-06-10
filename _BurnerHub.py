@@ -207,8 +207,8 @@ def execute_pipeline(port, mac, config):
         config["project_dir"] = fixed_dir
 
     if proj_dir == "0xfee1dead/null" or not is_platformio_project_dir(proj_dir):
-        print(f"[WARN] Invalid PlatformIO project directory [DIR: {proj_dir}] for device [MAC: {mac}]. Skipping.")
-        return
+        error_msg = f"Invalid PlatformIO project directory [DIR: {proj_dir}] for device [MAC: {mac}]."
+        raise FileNotFoundError(error_msg)
 
     print(f"\n[EXEC] Initializing Toolchain Pipeline...")
     print(f"  -> Target MAC   : {mac}")
@@ -229,11 +229,12 @@ def execute_pipeline(port, mac, config):
         subprocess.run(cmd, cwd=proj_dir, check=True)
         print("-" * 40)
         print(f"[OK] Build & Flash sequence complete for [MAC: {mac}] (Exit-Zero)!\n")
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
         print(f"[FAIL] Exception during processing for [MAC: {mac}]. Check syntax or environment variables.\n")
-    except FileNotFoundError:
+        raise e
+    except FileNotFoundError as e:
         print(f"[FATAL] Toolchain executable not found. If using ESP-IDF, ensure 'export.bat/sh' was run.\n")
-
+        raise e
 
 if __name__ == "__main__":
     print("=== ESP32 Orchestrator (Build & Provision) ===")
