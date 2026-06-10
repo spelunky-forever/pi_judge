@@ -654,30 +654,6 @@ def _main_impl(args, data_cache):
                 if len(ready_devices) > 1:
                     tty_print_row('[System] Verification', 'System', f'USING 1 OF {len(ready_devices)} BOARDS')
 
-                if args.no_flash:
-                    tty_begin_task('[Phase 2] Build & Flash', 'System', 'SKIPPING...')
-                    time.sleep(0.5)
-                    tty_end_task('System', 'SKIP')
-                else:
-                    tty_begin_task('[Phase 2] Build & Flash', 'System', 'FLASHING...')
-                    try:
-                        _BurnerHub.execute_pipeline(port, mac, config)
-                        time.sleep(1)
-                        tty_end_task('System', 'PASS')
-                    except Exception:
-                        tty_end_task('System', 'FAIL')
-                        raise
-
-            tty_begin_task('[Phase 3] Transmission Test', port, 'TESTING...')
-            baud = auto_detect_by_string(port, TARGET_READY_STRING)
-            if not baud:
-                tty_end_task(port, 'FAIL')
-                tty_print_row('[Phase 3] Transmission Test', 'System', 'FAIL')
-            else:
-                tty_end_task(port, 'PASS')
-
-                tty_begin_task('[Phase 4] Task Execution', 'System', 'PREPARING...')
-
             def parse_lines(content):
                 return [
                     line.strip()
@@ -698,9 +674,36 @@ def _main_impl(args, data_cache):
             phase6_total_duration = 0.0
             phase6_global_start = time.time()
 
+            tty_begin_task('[Phase 4] Task Execution', 'System', 'PREPARING...')
             tty_end_task('System', 'PASS')
 
             for pi_name, pi_timeout in PI_CASES:
+                target_proj_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'implementation', pi_name))
+                config['project_dir'] = target_proj_dir
+                
+                if args.no_flash:
+                    tty_begin_task(f'[Phase 2] Flash {pi_name}', port, 'SKIPPING...')
+                    time.sleep(0.5)
+                    tty_end_task(port, 'SKIP')
+                else:
+                    tty_begin_task(f'[Phase 2] Flash {pi_name}', port, 'FLASHING...')
+                    try:
+                        _BurnerHub.execute_pipeline(port, mac, config)
+                        time.sleep(1)
+                        tty_end_task(port, 'PASS')
+                    except Exception:
+                        tty_end_task(port, 'FAIL')
+                        tty_print_row(f'[Error] {pi_name}', port, 'BUILD/FLASH FAILED')
+                        continue
+            
+                tty_begin_task(f'[Phase 3] Sync {pi_name}', port, 'TESTING...')
+                baud = auto_detect_by_string(port, TARGET_READY_STRING)
+                if not baud:
+                    tty_end_task(port, 'FAIL')
+                    tty_print_row(f'[Error] {pi_name}', port, 'BOARD NOT READY')
+                    continue
+                tty_end_task(port, 'PASS')
+
                 tasks_in_content = data_cache.get(f"{pi_name}.in", "")
                 tasks_out_content = data_cache.get(f"{pi_name}.out", "")
 
