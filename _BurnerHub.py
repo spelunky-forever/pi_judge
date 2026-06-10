@@ -15,45 +15,66 @@ ESP32_HW_IDS = [
     (0x0403, 0x6001, "FTDI FT232RL"),
 ]
 
+PROJECT_NAMES = ["pi1", "pi2", "pi3", "pi4"]
+
+
+def is_platformio_project_dir(path):
+    """Return True if the path is a valid PlatformIO project root."""
+    return (
+        isinstance(path, str)
+        and os.path.isdir(path)
+        and os.path.isfile(os.path.join(path, "platformio.ini"))
+    )
+
+
+def find_platformio_root(start_dir):
+    """Find the nearest PlatformIO project root under the given path."""
+    if not start_dir or not os.path.isdir(start_dir):
+        return None
+
+    start_dir = os.path.abspath(start_dir)
+
+    if is_platformio_project_dir(start_dir):
+        return start_dir
+
+    for root, _, files in os.walk(start_dir):
+        if "platformio.ini" in files:
+            return os.path.abspath(root)
+
+    return None
+
+
 def find_default_projects():
-    """
-    Search upward for the "Section4-ESP32" directory (up to 5 levels deep),
-    then look for main.cpp within the src/ESP32-1 and src/ESP32-2 subdirectories.
-    Returns a list of tuples containing (absolute path to project root, absolute path to main.cpp).
-    """
-    current_dir = os.path.abspath(os.getcwd())
-    base_dir = None
-    
-    for _ in range(6):
-        target = os.path.join(current_dir, "Section4-ESP32")
-        if os.path.isdir(target):
-            base_dir = target
-            break
-        
-        parent_dir = os.path.dirname(current_dir)
-        if parent_dir == current_dir:
-            break
-        current_dir = parent_dir
-        
+    """Find valid PlatformIO projects under the implementation directory."""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    src_dir = os.path.join(current_dir, "implementation")
+
     valid_projects = []
-    
-    if base_dir:
-        src_dir = os.path.join(base_dir, "src")
-        for proj_name in ["ESP32-1", "ESP32-2"]:
-            proj_root = os.path.join(src_dir, proj_name)
-            
-            main_cpp_1 = os.path.join(proj_root, "main.cpp")
-            main_cpp_2 = os.path.join(proj_root, "src", "main.cpp")
-            
-            if os.path.isfile(main_cpp_1):
-                valid_projects.append((proj_root, main_cpp_1))
-            elif os.path.isfile(main_cpp_2):
-                valid_projects.append((proj_root, main_cpp_2))
-                
+
+    for name in PROJECT_NAMES:
+        candidate_dir = os.path.join(src_dir, name)
+        project_root = find_platformio_root(candidate_dir)
+
+        if not project_root:
+            continue
+
+        found_cpp = None
+        for root, _, files in os.walk(project_root):
+            for file_name in files:
+                if file_name.endswith(".cpp"):
+                    found_cpp = os.path.join(root, file_name)
+                    break
+            if found_cpp:
+                break
+
+        if found_cpp:
+            valid_projects.append((project_root, found_cpp))
+
     return valid_projects
 
+
 def find_esp32_ports():
-    """Scan system COM Ports for matching hardware IDs"""
+    """Scan serial ports for supported ESP32 devices."""
     esp_ports = []
     for port in serial.tools.list_ports.comports():
         if port.vid is not None and port.pid is not None:
@@ -63,8 +84,9 @@ def find_esp32_ports():
                     break
     return esp_ports
 
+
 def get_esp_mac(port):
-    """Extract hardware MAC Address using esptool"""
+    """Read the MAC address of an ESP32 board."""
     try:
         result = subprocess.run(
             [sys.executable, "-m", "esptool", "--port", port, "read_mac"],
@@ -77,8 +99,9 @@ def get_esp_mac(port):
         print(f"[ERROR] Failed to probe {port}: {e}")
     return None
 
+
 def manage_state_matrix(detected_devices):
-    """Maintain the Persistent State Matrix (JSON configuration)"""
+    """Load, repair, and update the persistent device mapping."""
     if os.path.exists(BURN_TABLE_FILE):
         with open(BURN_TABLE_FILE, 'r', encoding='utf-8') as f:
             burn_table = json.load(f)
@@ -87,53 +110,104 @@ def manage_state_matrix(detected_devices):
 
     matrix_updated = False
     ready_to_process = []
-    
+
     available_projects = find_default_projects()
+    valid_project_roots = [proj_root for proj_root, _ in available_projects]
+    used_roots = set()
+
+    def get_fallback_project():
+        for proj_root in valid_project_roots:
+            if proj_root not in used_roots:
+                return proj_root
+        return None
+
+    for mac, cfg in burn_table.items():
+        fixed_dir = find_platformio_root(cfg.get("project_dir", ""))
+        if fixed_dir:
+            cfg["project_dir"] = fixed_dir
+            used_roots.add(fixed_dir)
+        else:
+            fallback = get_fallback_project()
+            if fallback:
+                cfg["project_dir"] = fallback
+                used_roots.add(fallback)
+                matrix_updated = True
+
     proj_idx = 0
 
     for dev in detected_devices:
         port = dev['port']
         print(f"[*] Probing {port}...")
         mac = get_esp_mac(port)
-        
-        if not mac: continue
+
+        if not mac:
+            continue
 
         if mac not in burn_table:
-            if proj_idx < len(available_projects):
-                proj_root, main_cpp_path = available_projects[proj_idx]
-                assigned_dir = proj_root
-                print(f"[+] Discovered main.cpp at: {main_cpp_path}")
+            assigned_dir = None
+
+            while proj_idx < len(available_projects):
+                candidate_dir, _ = available_projects[proj_idx]
                 proj_idx += 1
-            else:
-                assigned_dir = "0xfee1dead/null"
+                if candidate_dir not in used_roots:
+                    assigned_dir = candidate_dir
+                    used_roots.add(candidate_dir)
+                    break
+
+            if not assigned_dir:
+                assigned_dir = get_fallback_project()
+                if assigned_dir:
+                    used_roots.add(assigned_dir)
+                else:
+                    assigned_dir = "0xfee1dead/null"
 
             burn_table[mac] = {
-                "project_dir": assigned_dir, 
+                "project_dir": assigned_dir,
                 "toolchain": "platformio",
                 "last_seen_port": port
             }
             matrix_updated = True
             print(f"[+] New device registered [MAC: {mac}]. Project assigned: {assigned_dir}")
         else:
-            if burn_table[mac]["last_seen_port"] != port:
-                burn_table[mac]["last_seen_port"] = port
+            cfg = burn_table[mac]
+            fixed_dir = find_platformio_root(cfg.get("project_dir", ""))
+
+            if fixed_dir and fixed_dir != cfg.get("project_dir"):
+                cfg["project_dir"] = fixed_dir
+                used_roots.add(fixed_dir)
                 matrix_updated = True
-            
+            elif not fixed_dir:
+                fallback = get_fallback_project()
+                if fallback and cfg.get("project_dir") != fallback:
+                    cfg["project_dir"] = fallback
+                    used_roots.add(fallback)
+                    matrix_updated = True
+
+            if cfg.get("last_seen_port") != port:
+                cfg["last_seen_port"] = port
+                matrix_updated = True
+
         ready_to_process.append((port, mac, burn_table[mac]))
 
     if matrix_updated:
         with open(BURN_TABLE_FILE, 'w', encoding='utf-8') as f:
             json.dump(burn_table, f, indent=4)
-            
+
     return ready_to_process
 
+
 def execute_pipeline(port, mac, config):
-    """Execute the Build & Flash pipeline"""
+    """Build and flash the assigned project."""
     proj_dir = config.get("project_dir", "")
     toolchain = config.get("toolchain", "esp-idf")
 
-    if proj_dir == "0xfee1dead/null" or not os.path.isdir(proj_dir):
-        print(f"[WARN] Invalid project directory [DIR: {proj_dir}] for device [MAC: {mac}]. Skipping.")
+    fixed_dir = find_platformio_root(proj_dir)
+    if fixed_dir:
+        proj_dir = fixed_dir
+        config["project_dir"] = fixed_dir
+
+    if proj_dir == "0xfee1dead/null" or not is_platformio_project_dir(proj_dir):
+        print(f"[WARN] Invalid PlatformIO project directory [DIR: {proj_dir}] for device [MAC: {mac}]. Skipping.")
         return
 
     print(f"\n[EXEC] Initializing Toolchain Pipeline...")
@@ -160,16 +234,17 @@ def execute_pipeline(port, mac, config):
     except FileNotFoundError:
         print(f"[FATAL] Toolchain executable not found. If using ESP-IDF, ensure 'export.bat/sh' was run.\n")
 
+
 if __name__ == "__main__":
     print("=== ESP32 Orchestrator (Build & Provision) ===")
     devices = find_esp32_ports()
-    
+
     if not devices:
         print("No ESP32 devices detected.")
     else:
         print(f"Detected {len(devices)} physical COM Ports. Reading MAC addresses...")
         task_queue = manage_state_matrix(devices)
-        
+
         for port, mac, config in task_queue:
             execute_pipeline(port, mac, config)
             time.sleep(1)
