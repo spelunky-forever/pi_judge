@@ -15,6 +15,7 @@ import uuid
 import tempfile
 import unicodedata
 import re
+import random
 
 _REAL_STDOUT = sys.__stdout__
 sys.stdout = open(os.devnull, 'w')
@@ -40,10 +41,10 @@ MONITOR_FILE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'
 
 # Additional stuff specific for pi_judge
 PI_CASES = [
-    ("pi1", 120.0),
-    ("pi2", 120.0),
-    ("pi3", 120.0),
-    ("pi4", 120.0),
+    ("pi1", 1000.0),
+    ("pi2", 1000.0),
+    ("pi3", 1000.0),
+    ("pi4", 1000.0),
 ]
 
 def parse_case_lines(content):
@@ -250,11 +251,9 @@ def new_redraw_screen():
     # 3. 印出目前的動態進度
     if CURRENT_DYNAMIC_TASK is not None:
         desc = CURRENT_DYNAMIC_TASK['description']
+        level = CURRENT_DYNAMIC_TASK.get('level', 'System')
         status = CURRENT_DYNAMIC_TASK['status']
-        
-        # 【關鍵修改】使用 CJK 包裝！
-        # 左邊框(2) + desc(41) + 中間分隔(3) + status(23) + 右邊框(2) = 剛好 71 格
-        dynamic_output.append(f"| {CJK(desc):<41} | {CJK(status):<23} |")
+        dynamic_output.append(f"| {CJK(desc):<31} | {CJK(level):<12} | {CJK(status):<18} |")
         
     # 4. 畫火車
     if not STOP_TRAIN_EVENT.is_set():
@@ -300,11 +299,12 @@ def tty_print(message):
         PERMANENT_LOGS.put(message)
         new_redraw_screen()
 
-def tty_new_dynamic_print(description, status):
+def tty_new_dynamic_print(description, level, status):
     global CURRENT_DYNAMIC_TASK
     with PRINT_LOCK:
         CURRENT_DYNAMIC_TASK = {
             "description": description,
+            "level": level,
             "status": status
         }
         new_redraw_screen()
@@ -360,12 +360,6 @@ class CJK:
             return (fillchar * left) + self.text + (fillchar * right)
             
         return self.text
-
-def tty_print_row(phase, port, result):
-    with PRINT_LOCK:
-        formatted_msg = f"| {phase:<32} | {port:<8} | {result:<21} |"
-        PERMANENT_LOGS.put(formatted_msg)
-        new_redraw_screen()
 
 def tty_begin_task(phase, port, running_msg):
     with PRINT_LOCK:
@@ -428,8 +422,9 @@ def auto_detect_by_string(port, target_string):
 
 def esp_worker_node(port_name, baudrate, specific_queue, target_string, case_timeout_sec, case_name):
     try:
+        level_str = case_name.upper().replace('PI', 'LEVEL ')
         with serial.Serial(port_name, baudrate, timeout=2) as ser:
-            tty_new_dynamic_print(f"🔌 喚醒賴床的卡皮巴拉 ({port_name})", "⚡ 暖機重啟 (REBOOT)")
+            tty_new_dynamic_print(f"🔌 喚醒賴床的卡皮巴拉~", level_str, "⚡ 暖機 (REBOOT)")
             GLOBAL_START_EVENT.wait()
 
             ser.reset_input_buffer()
@@ -470,7 +465,7 @@ def esp_worker_node(port_name, baudrate, specific_queue, target_string, case_tim
             is_timeout = False
 
             # 【修改 1】移除舊版的 tty_begin_task，改用我們自定義的動態狀態初始畫面
-            tty_new_dynamic_print(f"🍡 準備餵食... 測資目標: {case_name}", f"🍽️ 等待中: 0/{total_tasks}")
+            tty_new_dynamic_print(f"🍡 準備餵食...", level_str, f"🍽️ 等待中: 0/{total_tasks}")
 
             while True:
                 task = specific_queue.get()
@@ -481,12 +476,12 @@ def esp_worker_node(port_name, baudrate, specific_queue, target_string, case_tim
                     # 【修改 2】結束時清空動態任務，並把最終結果推入永久 Log 避免畫面卡住
                     global CURRENT_DYNAMIC_TASK
                     CURRENT_DYNAMIC_TASK = None
-                    phase_text = f"🍡 餵食結算: {case_name}"
-                    progress_text = f"🍽️ {current_idx}/{total_tasks} 份"
+                    phase_text = f"🍡 餵食結算:"
+                    progress_text = f"🍽️ {current_idx}/{total_tasks}份"
                     if is_timeout:
-                        result_text = "💤 吃到睡著 (TIMEOUT)"
+                        result_text = "💤 睡著 TIMEOUT"
                     else:
-                        result_text = "😋 盤子空空 (PASS)"
+                        result_text = "⏰ 進食結束"
 
                     tty_print(f"| {CJK(phase_text):<31} | {CJK(progress_text):<12} | {CJK(result_text):<18} |")
                     specific_queue.task_done()
@@ -504,9 +499,9 @@ def esp_worker_node(port_name, baudrate, specific_queue, target_string, case_tim
                 current_food = food_menu[current_idx % len(food_menu)]
                 
                 # 呼叫動態印出
-                desc_text = f"🍡 餵食中... 測資目標: {case_name}"
+                desc_text = f"🍡 餵食中..."
                 status_text = f"{current_food} 嚼嚼: {current_idx}/{total_tasks}"
-                tty_new_dynamic_print(desc_text, status_text)
+                tty_new_dynamic_print(desc_text, level_str, status_text)
 
                 write_monitor_log(f"[Stage 2] [Start] Port: {port_name}, Task: {task}")
 
@@ -679,6 +674,7 @@ def main():
         restore_data_dir(data_dir, data_cache)
 
 def _main_impl(args, data_cache):
+    time_base3, time_base4, time_err = 1000.0, 1000.0, 10.0
     reserve_lines = len(TRAIN_ART_STEAM_RIGHT)
     _REAL_STDOUT.write("\n" * reserve_lines)
     _REAL_STDOUT.write(f"\r\033[{reserve_lines}A")
@@ -722,7 +718,7 @@ def _main_impl(args, data_cache):
 
             if not ready_devices:
                 #tty_end_task('System', 'FAIL')
-                tty_print_row('[System] Verification', 'System', 'NO REGISTERED DEVICE')
+                #tty_print_row('[System] Verification', 'System', 'NO REGISTERED DEVICE')
                 ending = 2
             else:
                 port, mac, config = ready_devices[0]
@@ -730,7 +726,8 @@ def _main_impl(args, data_cache):
                 #tty_end_task('System', 'PASS')
 
                 if len(ready_devices) > 1:
-                    tty_print_row('[System] Verification', 'System', f'USING 1 OF {len(ready_devices)} BOARDS')
+                    pass
+                    #tty_print_row('[System] Verification', 'System', f'USING 1 OF {len(ready_devices)} BOARDS')
 
             def parse_lines(content):
                 return [
@@ -753,12 +750,13 @@ def _main_impl(args, data_cache):
             phase6_total_duration = 0.0
             phase6_global_start = time.time()
 
-            for pi_name, pi_timeout in PI_CASES:
+            for idx, (pi_name, pi_timeout) in enumerate(PI_CASES):
+                level_str = pi_name.upper().replace('PI', 'LEVEL ')
                 target_proj_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'implementation', pi_name))
                 config['project_dir'] = target_proj_dir
                 
                 # --- 準備階段：動態顯示 (會一直留在畫面上直到被清空) ---
-                tty_new_dynamic_print(f"🥘 烤蛋糕中: {pi_name}", "FLASHING...")
+                tty_new_dynamic_print(f"🥘 烤蛋糕中~", level_str, "FLASHING...")
                 
                 try:
                     _BurnerHub.execute_pipeline(port, mac, config)
@@ -766,28 +764,28 @@ def _main_impl(args, data_cache):
                     
                     # 結束了！清空動態畫面，並把結果推入永久 Log
                     CURRENT_DYNAMIC_TASK = None
-                    tty_print(f"| {CJK(f'🍳 蛋糕美味出爐: {pi_name}'):<31} | {CJK(port):<12} | {CJK('🌟 PASS 🌟'):<18} |")
+                    tty_print(f"| {CJK(f'🍳 蛋糕美味出爐~'):<31} | {CJK(level_str):<12} | {CJK('🌟 PASS 🌟'):<18} |")
                     
                 except Exception:
                     CURRENT_DYNAMIC_TASK = None
-                    tty_print(f"| {CJK(f'❌ 蛋糕不小心烤焦: {pi_name}'):<31} | {CJK(port):<12} | {CJK('💔 FAIL 💔'):<18} |")
-                    tty_print(f"| {CJK(f'🚨 廚房突然炸掉 ({pi_name})'):<31} | {CJK(port):<12} | {CJK('BUILD/FLASH FAILED'):<18} |")
+                    tty_print(f"| {CJK(f'❌ 蛋糕不小心烤焦~'):<31} | {CJK(level_str):<12} | {CJK('💔 FAIL 💔'):<18} |")
+                    tty_print(f"| {CJK(f'🚨 廚房突然炸掉~'):<31} | {CJK(level_str):<12} | {CJK('BUILD/FLASH FAILED'):<18} |")
                     ending = 2
                     continue
             
                 # --- 同步階段：動態顯示 ---
-                tty_new_dynamic_print(f"📡 呼叫卡皮巴拉: {pi_name}", "SYNCING...")
+                tty_new_dynamic_print(f"📡 呼叫卡皮巴拉~", level_str, "SYNCING...")
                 baud = auto_detect_by_string(port, TARGET_READY_STRING)
                 CURRENT_DYNAMIC_TASK = None
                 
                 if not baud:
                     # 失敗：推入永久 Log
-                    tty_print(f"| {CJK(f'❌ 卡皮巴拉沒聽到: {pi_name}'):<31} | {CJK(port):<12} | {CJK('💔 FAIL 💔'):<18} |")
-                    tty_print(f"| {CJK(f'💤 睡得太沉叫不醒 ({pi_name})'):<31} | {CJK(port):<12} | {CJK('BOARD NOT READY'):<18} |")
+                    tty_print(f"| {CJK(f'❌ 卡皮巴拉沒聽到: {pi_name}'):<31} | {CJK(level_str):<12} | {CJK('💔 FAIL 💔'):<18} |")
+                    tty_print(f"| {CJK(f'💤 睡得太沉叫不醒 ({pi_name})'):<31} | {CJK(level_str):<12} | {CJK('BOARD NOT READY'):<18} |")
                     ending = 1
                     continue
                 
-                tty_print(f"| {CJK(f'🎵 卡皮巴拉張開眼睛: {pi_name}'):<31} | {CJK(port):<12} | {CJK('🌟 PASS 🌟'):<18} |")
+                #tty_print(f"| {CJK(f'🎵 卡皮巴拉肚子餓了: {pi_name}'):<31} | {CJK(level_str):<12} | {CJK('🌟 PASS 🌟'):<18} |")
 
                 tasks_in_content = data_cache.get(f"{pi_name}.in", "")
                 tasks_out_content = data_cache.get(f"{pi_name}.out", "")
@@ -796,7 +794,7 @@ def _main_impl(args, data_cache):
                 all_answers = parse_lines(tasks_out_content)
 
                 if not all_tasks or not all_answers:
-                    tty_new_dynamic_print('[Phase 4] Missing Case File', pi_name, 'FAIL')
+                    tty_new_dynamic_print('[Phase 4] Missing Case File', level_str, 'FAIL')
                     continue
 
                 EXPECTED_ANSWERS = {}
@@ -850,10 +848,6 @@ def _main_impl(args, data_cache):
                 elif JUDGE_RESULTS[pi_name]['pass'] < JUDGE_RESULTS[pi_name]['total']:
                     # 沒超時但有錯，挑食只吃一半
                     ending = 4
-                else:
-                    # 全對 (如果前面的 pi 沒失敗的話，預設維持 5 或 0)
-                    if ending not in [1, 2, 3, 4]: 
-                        ending = 5
 
                 #tty_begin_task('[Phase 7] Answer Evaluation', 'System', 'EVALUATING...')
                 #time.sleep(1.2)
@@ -884,6 +878,11 @@ def _main_impl(args, data_cache):
                     pass
                     #tty_end_task('System', 'FAIL')
 
+                if idx < len(PI_CASES) - 1:
+                    tty_print(f"+{'':-^69}+")
+                    tty_print(f"|{CJK(' 🍵 中場休息，準備端上下一盤... 🍵 '):-^69}|")
+                    tty_print(f"+{'':-^69}+")
+
     finally:
         STOP_TRAIN_EVENT.set()
         train_thread.join()
@@ -893,86 +892,142 @@ def _main_impl(args, data_cache):
     if(ending == 0):
         tty_print(f"+{'':=^69}+")
         tty_print(f"|{CJK(' ✨ 餵食秀圓滿落幕！卡皮巴拉拍了拍肚皮 (๑´ڡ`๑) ✨ '):^69}|")
-        tty_print(f"|{'':-^69}|")
-        phase_text = "🎉 評測結算: Judge Ended"
-        port_text = "🤖 System"
-        result_text = "🌟 PASS 🌟"
-        tty_print(f"| {CJK(phase_text):<31} | {CJK(port_text):<12} | {CJK(result_text):<18} |")
+        # tty_print(f"|{'':-^69}|")
+        # phase_text = "🎉 評測結算: Judge Ended"
+        # level_text = "ALL LEVELS"
+        # result_text = "🌟 PASS 🌟"
+        # tty_print(f"| {CJK(phase_text):<31} | {CJK(level_text):<12} | {CJK(result_text):<18} |")
         tty_print(f"+{'':=^69}+")
     elif(ending == 1):
         tty_print(f"+{'':=^69}+")
         tty_print(f"|{CJK(' 🍃 找不到卡皮巴拉！飼料撒了一地...( ºΔº ) 🍃 '):^69}|")
-        tty_print(f"|{'':-^69}|")
-        tty_print(f"| {CJK('🔍 評測結算: Missing Target'):<31} | {CJK('🤖 System'):<12} | {CJK('👻 NO DEVICE 👻'):<18} |")
+        # tty_print(f"|{'':-^69}|")
+        # tty_print(f"| {CJK('🔍 評測結算: Missing Target'):<31} | {CJK('ALL LEVELS'):<12} | {CJK('👻 NO DEVICE 👻'):<18} |")
         tty_print(f"+{'':=^69}+")
     elif(ending == 2):
         tty_print(f"+{'':=^69}+")
         tty_print(f"|{CJK(' 💥 碰！遇上了未知事故，卡皮巴拉嚇到躲起來了 (つд⊂) 💥 '):^69}|")
-        tty_print(f"|{'':-^69}|")
-        tty_print(f"| {CJK('🚨 評測結算: System Error'):<31} | {CJK('🤖 System'):<12} | {CJK('💀 FATAL FAIL 💀'):<18} |")
+        # tty_print(f"|{'':-^69}|")
+        # tty_print(f"| {CJK('🚨 評測結算: System Error'):<31} | {CJK('ALL LEVELS'):<12} | {CJK('💀 FATAL FAIL 💀'):<18} |")
         tty_print(f"+{'':=^69}+")
     elif(ending == 3):
         tty_print(f"+{'':=^69}+")
         tty_print(f"|{CJK(' 🥣 卡皮巴拉一臉嫌棄，一口都不肯吃... ( ´•̥×•̥` ) 🥣 '):^69}|")
-        tty_print(f"|{'':-^69}|")
-        tty_print(f"| {CJK('🥀 評測結算: Zero Points'):<31} | {CJK('🤖 System'):<12} | {CJK('💔 0 / 100 💔'):<18} |")
+        # tty_print(f"|{'':-^69}|")
+        # tty_print(f"| {CJK('🥀 評測結算: Zero Points'):<31} | {CJK('ALL LEVELS'):<12} | {CJK('💔 0 / 100 💔'):<18} |")
         tty_print(f"+{'':=^69}+")
     elif(ending == 4):
         tty_print(f"+{'':=^69}+")
         tty_print(f"|{CJK(' 🍰 卡皮巴拉挑食中，只吃了一部分蛋糕 ( ˘•ω•˘ ) 🍰 '):^69}|")
-        tty_print(f"|{'':-^69}|")
-        tty_print(f"| {CJK('⚖️ 評測結算: Partial Pass'):<31} | {CJK('🤖 System'):<12} | {CJK('🚧 NEEDS WORK 🚧'):<18} |")
-        tty_print(f"+{'':=^69}+")
-    elif(ending == 5):
-        tty_print(f"+{'':=^69}+")
-        tty_print(f"|{CJK(' 🌿 卡皮巴拉悠哉地吃完了，打了一個飽嗝 ( ¯꒳¯ ) 🌿 '):^69}|")
-        tty_print(f"|{'':-^69}|")
-        tty_print(f"| {CJK('🎈 評測結算: Normal Pass'):<31} | {CJK('🤖 System'):<12} | {CJK('✅ CLEAR ✅'):<18} |")
+        # tty_print(f"|{'':-^69}|")
+        # tty_print(f"| {CJK('⚖️ 評測結算: Partial Pass'):<31} | {CJK('ALL LEVELS'):<12} | {CJK('🚧 NEEDS WORK 🚧'):<18} |")
         tty_print(f"+{'':=^69}+")
 
     tty_print("")
     tty_print("=" * 71)
-    tty_print(f"| {'ESP32 ON-TARGET EXECUTION (100%)':<67} |")
+    # 換成輕鬆可愛但一目了然的標題，使用 CJK 確保對齊
+    tty_print(f"| {CJK('📊 餵食總結算 (卡皮巴拉進食報告)'):<67} |")
     tty_print("-" * 71)
-    tty_print(f"| {'TARGET':<15} | {'STATUS':<18} | {'TIME':<14} | {'SCORE':<11} |")
+    # 將 TARGET 換成 LEVEL
+    tty_print(f"| {'LEVEL':<15} | {'STATUS':<18} | {'TIME':<14} | {'SCORE':<11} |")
     tty_print("-" * 71)
 
-    if stage2_score == 0.0 and total_tasks_all > 0:
-        accuracy_ratio = total_passed_all / total_tasks_all
-        k_penalty = 6.0
-        C_time_base = 180
-        p_tail = 2.5
-        if accuracy_ratio > 0:
-            stage2_score = (100.0 * math.pow(accuracy_ratio, k_penalty)) / (1.0 + math.pow(phase6_total_duration / C_time_base, p_tail))
+    # if stage2_score == 0.0 and total_tasks_all > 0:
+    #     accuracy_ratio = total_passed_all / total_tasks_all
+    #     k_penalty = 6.0
+    #     C_time_base = 180
+    #     p_tail = 2.5
+    #     if accuracy_ratio > 0:
+    #         stage2_score = (100.0 * math.pow(accuracy_ratio, k_penalty)) / (1.0 + math.pow(phase6_total_duration / C_time_base, p_tail))
 
     if total_tasks_all > 0:
         acc_str = f"{total_passed_all}/{total_tasks_all} ({(total_passed_all / total_tasks_all) * 100:.1f}%)"
     else:
         acc_str = "0/0 (0.0%)"
     time_str = f"{phase6_total_duration:.3f} s"
+    level_score = 0.0
+    total_score = 0.0
 
-    # 遍歷 JUDGE_RESULTS，也就是 pi1, pi2, pi3, pi4
     for pi_name, stats in sorted(JUDGE_RESULTS.items()):
         c_total = stats['total']
         c_pass = stats['pass']
         
-        # 從你建立的字典抓出各自獨立的時間，如果沒有紀錄就給 0.0
         c_time = execution_times.get(pi_name, 0.0) 
         
         c_acc_str = f"{c_pass}/{c_total} ({c_pass/c_total*100:.1f}%)" if c_total > 0 else "0/0 (0.0%)"
         c_time_str = f"{c_time:.3f} s"
         
-        # 為了跟原本的格式對齊，加上括號 [pi1], [pi2]
-        formatted_name = f"[{pi_name}]"
-        tty_print(f"| {formatted_name:<15} | {c_acc_str:<18} | {c_time_str:<14} | {'-':<11} |")
-    # ---------------------------------------------------
+        # 【關鍵修改】不再印出 [pi1]，而是轉換成 LEVEL 1
+        level_str = pi_name.upper().replace('PI', 'LEVEL ')
+
+        if(pi_name=='pi1' or pi_name=='pi2'):
+            level_score = (c_pass / c_total) * 25 if c_total > 0 else 0.0
+        elif(pi_name=='pi3'):
+            level_score = (c_pass / c_total) * 25 if c_total > 0 else 0.0
+            effective_time = c_time - time_err if c_time > time_err else 0.0
+            time_ratio = time_base3 / effective_time if effective_time > time_base3 else 1.0
+            level_score *= time_ratio
+            
+        elif(pi_name=='pi4'):
+            level_score = (c_pass / c_total) * 25 if c_total > 0 else 0.0
+            effective_time = c_time - time_err if c_time > time_err else 0.0
+            time_ratio = time_base4 / effective_time if effective_time > time_base4 else 1.0
+            level_score *= time_ratio
+
+        total_score += level_score
+        
+        # 直接印出 LEVEL，不需要加中括號了，看起來更乾淨！
+        tty_print(f"| {level_str:<15} | {c_acc_str:<18} | {c_time_str:<14} | {f'{level_score:.1f}':<11} |")
 
     tty_print("-" * 71)
-    tty_print(f"| {'STAGE 2 SCORE':<15} | {acc_str:<18} | {time_str:<14} | {f'{stage2_score:.1f}':<11} |")
+    tty_print(f"| {'STAGE TOTAL':<15} | {acc_str:<18} | {time_str:<14} | {f'{total_score:.1f}':<11} |")
     tty_print("=" * 71)
 
-    final_total = stage2_score
-    tty_print(f"| {'FINAL SCORE (ESP32 only)':<53} | {final_total:>11.1f} |")
+    final_total = total_score
+    # 順便把最後的總分標題也改得更有趣一點
+    tty_print(f"| {CJK('🌟 綜合飽足指數 (FINAL SCORE)'):<53} | {final_total:>11.1f} |")
+    tty_print("=" * 71)
+
+    if final_total == 100.0:
+        title = "🏆 稱號：【傳說中的米其林三星飼養員】"
+        comments = [
+            "太神啦！卡皮巴拉把盤子舔得閃閃發光！",
+            "教科書級的完美飼料！感動到流下眼淚。",
+            "零 Bug 極致美味！牠決定跟你一輩子了。",
+            "神級正確率！卡皮巴拉爽到原地升級啦！",
+            "滿分！今年的諾貝爾獎就頒給這段 Code！"
+        ]
+    elif final_total >= 60.0:
+        title = "👨‍🍳 稱號：【卡皮巴拉專屬特級廚師】"
+        comments = [
+            "不錯唷！卡皮巴拉給了你一個讚賞的眼神。",
+            "這飼料超越了學餐水準！卡皮巴拉表示滿意。",
+            "味道及格！足以讓卡皮巴拉快樂地泡溫泉了。",
+            "咀嚼飛快！看來你的演算法跟排程沒白學！",
+            "打個飽嗝，並把這菜加進 Steam 願望清單！"
+        ]
+    elif final_total > 0.0:
+        title = "🌪️ 稱號：【黑暗料理界新星】"
+        comments = [
+            "吃了一口眉頭一皺，發現案情並不單純...",
+            "當減肥餐吧？卡皮巴拉勉強吃幾口就去玩沙了。",
+            "這味道...就像修 Bug 到凌晨三點的心酸。",
+            "這飼料有期中考被當的無力感...嚼不動啊！",
+            "吃了一點點，剩下的被偷偷丟進資源回收桶！"
+        ]
+    else:
+        title = "☠️ 稱號：【地獄廚房學徒】"
+        comments = [
+            "卡皮巴拉寧願啃杜邦線，也不碰這程式碼！",
+            "這是生化武器？卡皮巴拉的血壓都比這分數高！",
+            "連壓倒性負評的爛 Game 都比這好啃！已退款。",
+            "飼料引發 Seg Fault，卡皮巴拉直接當機啦！",
+            "零分！這報廢率簡直比期末考微積分還慘烈！"
+        ]
+
+    chosen_comment = random.choice(comments)
+    tty_print(f"| {CJK(title):<67} |")
+    tty_print(f"| {CJK('💬 評語：' + chosen_comment):<67} |")
     tty_print("=" * 71)
 
     has_stage2_errors = any(len(res.get('errors', [])) > 0 for res in JUDGE_RESULTS.values())

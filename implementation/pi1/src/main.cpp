@@ -5,7 +5,8 @@ extern void run_pi(const char* tag, const char* payload);
 String inputBuffer = "";
 
 void setup() {
-    Serial.begin(115200);
+    setCpuFrequencyMhz(20);
+    Serial.begin(460800);
     
     while (!Serial) {
         delay(10);
