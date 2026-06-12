@@ -41,10 +41,9 @@ MONITOR_FILE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'
 
 # Additional stuff specific for pi_judge
 PI_CASES = [
-    ("pi1", 1000.0),
-    ("pi2", 1000.0),
-    ("pi3", 1000.0),
-    ("pi4", 1000.0),
+    ("pi1", 50.0),
+    ("pi2", 180.0),
+    ("pi3", 180.0)
 ]
 
 def parse_case_lines(content):
@@ -674,7 +673,7 @@ def main():
         restore_data_dir(data_dir, data_cache)
 
 def _main_impl(args, data_cache):
-    time_base3, time_base4, time_err = 1000.0, 1000.0, 10.0
+    time_base3, time_err = 11.5, 5.0
     reserve_lines = len(TRAIN_ART_STEAM_RIGHT)
     _REAL_STDOUT.write("\n" * reserve_lines)
     _REAL_STDOUT.write(f"\r\033[{reserve_lines}A")
@@ -961,17 +960,11 @@ def _main_impl(args, data_cache):
         level_str = pi_name.upper().replace('PI', 'LEVEL ')
 
         if(pi_name=='pi1' or pi_name=='pi2'):
-            level_score = (c_pass / c_total) * 25 if c_total > 0 else 0.0
+            level_score = (c_pass / c_total) * 30 if c_total > 0 else 0.0
         elif(pi_name=='pi3'):
-            level_score = (c_pass / c_total) * 25 if c_total > 0 else 0.0
+            level_score = (c_pass / c_total) * 40 if c_total > 0 else 0.0
             effective_time = c_time - time_err if c_time > time_err else 0.0
             time_ratio = time_base3 / effective_time if effective_time > time_base3 else 1.0
-            level_score *= time_ratio
-            
-        elif(pi_name=='pi4'):
-            level_score = (c_pass / c_total) * 25 if c_total > 0 else 0.0
-            effective_time = c_time - time_err if c_time > time_err else 0.0
-            time_ratio = time_base4 / effective_time if effective_time > time_base4 else 1.0
             level_score *= time_ratio
 
         total_score += level_score
