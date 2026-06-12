@@ -13,6 +13,8 @@ import platform
 import _BurnerHub
 import uuid
 import tempfile
+import unicodedata
+import re
 
 _REAL_STDOUT = sys.__stdout__
 sys.stdout = open(os.devnull, 'w')
@@ -22,11 +24,11 @@ target_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src
 PRINT_LOCK = threading.Lock()
 GLOBAL_START_EVENT = threading.Event()  
 START_TASKS_EVENT = threading.Event()   
-PRINTED_PHASES = set()                  
 STOP_TRAIN_EVENT = threading.Event()    
 
 PERMANENT_LOGS = queue.Queue()  
-ACTIVE_TASKS = {}               
+ACTIVE_TASKS = {}
+CURRENT_DYNAMIC_TASK = None      
 LAST_DYNAMIC_LINES = 0          
 
 JUDGE_RESULTS = {}              
@@ -195,19 +197,11 @@ def redraw_screen():
         _REAL_STDOUT.write(f"\033[2K\r{PERMANENT_LOGS.get()}\n")
         
     dynamic_output = []
-    temp_printed_phases = set(PRINTED_PHASES)
     
     for port in sorted(ACTIVE_TASKS.keys()):
         task = ACTIVE_TASKS[port]
         phase = task['phase']
-        
-        if phase not in temp_printed_phases:
-            temp_printed_phases.add(phase)
-            display_phase = phase
-        else:
-            display_phase = ""
-            
-        dynamic_output.append(f"| {display_phase:<32} | {port:<8} | {task['result']:<21} |")
+        dynamic_output.append(f"| {phase:<32} | {port:<8} | {task['result']:<21} |")
         
     if not STOP_TRAIN_EVENT.is_set():
         TRAIN_HEIGHT = len(CURRENT_TRAIN_ART)
@@ -238,28 +232,140 @@ def redraw_screen():
     LAST_DYNAMIC_LINES = dynamic_lines
     _REAL_STDOUT.flush()
 
+def new_redraw_screen():
+    global LAST_DYNAMIC_LINES, CURRENT_DYNAMIC_TASK
+    
+    # 1. 游標退回
+    if LAST_DYNAMIC_LINES > 1:
+        _REAL_STDOUT.write(f"\r\033[{LAST_DYNAMIC_LINES - 1}A")
+    elif LAST_DYNAMIC_LINES == 1:
+        _REAL_STDOUT.write("\r")
+        
+    # 2. 印出永久寫死的內容 (從 Queue 裡面倒出來)
+    while not PERMANENT_LOGS.empty():
+        _REAL_STDOUT.write(f"\033[2K\r{PERMANENT_LOGS.get()}\n")
+        
+    dynamic_output = []
+    
+    # 3. 印出目前的動態進度
+    if CURRENT_DYNAMIC_TASK is not None:
+        desc = CURRENT_DYNAMIC_TASK['description']
+        status = CURRENT_DYNAMIC_TASK['status']
+        
+        # 【關鍵修改】使用 CJK 包裝！
+        # 左邊框(2) + desc(41) + 中間分隔(3) + status(23) + 右邊框(2) = 剛好 71 格
+        dynamic_output.append(f"| {CJK(desc):<41} | {CJK(status):<23} |")
+        
+    # 4. 畫火車
+    if not STOP_TRAIN_EVENT.is_set():
+        TRAIN_HEIGHT = len(CURRENT_TRAIN_ART)
+        for i in range(TRAIN_HEIGHT):
+            dynamic_output.append(get_train_frame(i))
+            
+    dynamic_lines = len(dynamic_output)
+    
+    # 5. 實際寫入終端機並清除舊畫面殘影
+    for i, line in enumerate(dynamic_output):
+        _REAL_STDOUT.write(f"\033[2K\r{line}")
+        if i < dynamic_lines - 1:
+            _REAL_STDOUT.write("\n")
+            
+    # 行數變少時的邊界清理邏輯
+    if dynamic_lines == 0:
+        if LAST_DYNAMIC_LINES > 0:
+            _REAL_STDOUT.write("\033[2K\r") 
+            for _ in range(LAST_DYNAMIC_LINES - 1):
+                _REAL_STDOUT.write("\n\033[2K\r")
+            if LAST_DYNAMIC_LINES - 1 > 0:
+                _REAL_STDOUT.write(f"\033[{LAST_DYNAMIC_LINES - 1}A")
+    else:
+        leftover = LAST_DYNAMIC_LINES - dynamic_lines
+        if leftover > 0:
+            for _ in range(leftover):
+                _REAL_STDOUT.write("\n\033[2K\r")
+            _REAL_STDOUT.write(f"\033[{leftover}A")
+            
+    LAST_DYNAMIC_LINES = dynamic_lines
+    _REAL_STDOUT.flush()
+
 def train_animation():
     while not STOP_TRAIN_EVENT.is_set():
         update_train_state()
         with PRINT_LOCK:
-            redraw_screen()
+            new_redraw_screen()
         time.sleep(0.08)
 
 def tty_print(message):
     with PRINT_LOCK:
         PERMANENT_LOGS.put(message)
-        redraw_screen()
+        new_redraw_screen()
+
+def tty_new_dynamic_print(description, status):
+    global CURRENT_DYNAMIC_TASK
+    with PRINT_LOCK:
+        CURRENT_DYNAMIC_TASK = {
+            "description": description,
+            "status": status
+        }
+        new_redraw_screen()
+
+class CJK:
+    """專門用來讓 f-string 支援中日韓全形字元排版的魔法容器"""
+    def __init__(self, text):
+        self.text = str(text)
+        
+    def __format__(self, format_spec):
+        if not format_spec:
+            return self.text
+            
+        # 把後面的數字(width)跟前面的符號(prefix)拆開
+        match = re.match(r'^(?P<prefix>.*?)(?P<width>\d+)$', format_spec)
+        
+        if not match:
+            # 如果格式不符合一般排版規則，退回給 Python 原生處理
+            return format(self.text, format_spec) 
+            
+        prefix = match.group('prefix')
+        total_width = int(match.group('width'))
+        
+        # 精準判斷前綴符號
+        if len(prefix) == 0:
+            fillchar, align = ' ', '<'              # 例: :32
+        elif len(prefix) == 1:
+            if prefix in '<>=^':
+                fillchar, align = ' ', prefix       # 例: :^69 或 :<32
+            else:
+                return format(self.text, format_spec)
+        elif len(prefix) == 2:
+            fillchar, align = prefix[0], prefix[1]  # 例: :=^71 或 :-<30
+            if align not in '<>=^':
+                return format(self.text, format_spec)
+        else:
+            return format(self.text, format_spec)
+        
+        # --- 核心排版邏輯 ---
+        visual_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in self.text)
+        pad_len = total_width - visual_width
+        
+        if pad_len <= 0:
+            return self.text
+            
+        if align == '<':
+            return self.text + (fillchar * pad_len)
+        elif align == '>':
+            return (fillchar * pad_len) + self.text
+        elif align == '^':
+            left = pad_len // 2
+            right = pad_len - left
+            return (fillchar * left) + self.text + (fillchar * right)
+            
+        return self.text
 
 def tty_print_row(phase, port, result):
     with PRINT_LOCK:
-        if phase not in PRINTED_PHASES:
-            PRINTED_PHASES.add(phase)
-            display_phase = phase
-        else:
-            display_phase = "" 
-        formatted_msg = f"| {display_phase:<32} | {port:<8} | {result:<21} |"
+        formatted_msg = f"| {phase:<32} | {port:<8} | {result:<21} |"
         PERMANENT_LOGS.put(formatted_msg)
-        redraw_screen()
+        new_redraw_screen()
 
 def tty_begin_task(phase, port, running_msg):
     with PRINT_LOCK:
@@ -267,23 +373,16 @@ def tty_begin_task(phase, port, running_msg):
             "phase": phase,
             "result": running_msg
         }
-        redraw_screen()
+        new_redraw_screen()
 
 def tty_end_task(port, final_result):
     with PRINT_LOCK:
         if port in ACTIVE_TASKS:
             task = ACTIVE_TASKS.pop(port)
             phase = task["phase"]
-            
-            if phase not in PRINTED_PHASES:
-                PRINTED_PHASES.add(phase)
-                display_phase = phase
-            else:
-                display_phase = ""
-                
-            formatted_msg = f"| {display_phase:<32} | {port:<8} | {final_result:<21} |"
+            formatted_msg = f"| {phase:<32} | {port:<8} | {final_result:<21} |"
             PERMANENT_LOGS.put(formatted_msg)
-        redraw_screen()
+        new_redraw_screen()
 
 def read_lines_from_file(filepath):
     if not os.path.exists(filepath):
@@ -295,67 +394,6 @@ def read_lines_from_file(filepath):
             if clean_line and not clean_line.startswith("#"):
                 lines.append(clean_line)
     return lines
-
-def run_local_tests(data_cache):
-    stage1_score = 0
-    stage1_passed = True
-    stage1_details = {}
-    stage1_errors = []
-
-    targets = {'pi': 25, 'sha256': 25, 'uni': 50}
-    ext = ".exe" if platform.system() == "Windows" else ""
-    phase_0_name = '[Phase 0] Algorithm Evaluation'
-
-    for target, max_pts in targets.items():
-        tty_begin_task(phase_0_name, target, 'TESTING...')
-        write_monitor_log(f"[Stage 1] [Start] Target: {target}")
-        exe_path = os.path.abspath(os.path.join("../src/EZ-code/build", "bin", target + ext))
-        in_key = target + ".in"
-        out_key = target + ".out"
-
-        if not os.path.exists(exe_path) or in_key not in data_cache or out_key not in data_cache:
-            stage1_details[target] = {'score': 0, 'max': max_pts, 'status': 'FILE MISSING'}
-            stage1_passed = False
-            tty_end_task(target, 'FAIL')
-            write_monitor_log(f"[Stage 1] [Finished] Target: {target}, Result: FAIL (FILE MISSING)")
-            continue
-
-        try:
-            input_data = data_cache[in_key]
-            expected_out = data_cache[out_key].strip()
-
-            with tempfile.TemporaryDirectory() as tmpdir:
-                result = subprocess.run([exe_path], input=input_data, text=True, capture_output=True, timeout=10.0, cwd=tmpdir)
-            got_out = result.stdout.strip()
-
-            if got_out == expected_out:
-                stage1_score += max_pts
-                stage1_details[target] = {'score': max_pts, 'max': max_pts, 'status': 'PASS'}
-                tty_end_task(target, 'PASS')
-                write_monitor_log(f"[Stage 1] [Finished] Target: {target}, Result: PASS")
-            else:
-                stage1_details[target] = {'score': 0, 'max': max_pts, 'status': 'WRONG ANSWER'}
-                stage1_passed = False
-                stage1_errors.append({
-                    'task': f"Local Target: {target}",
-                    'expected': repr(expected_out)[1:-1],
-                    'got': repr(got_out)[1:-1]
-                })
-                tty_end_task(target, 'FAIL')
-                write_monitor_log(f"[Stage 1] [Finished] Target: {target}, Result: FAIL (WRONG ANSWER)")
-        except subprocess.TimeoutExpired:
-            stage1_details[target] = {'score': 0, 'max': max_pts, 'status': 'TIMEOUT'}
-            stage1_passed = False
-            tty_end_task(target, 'FAIL')
-            write_monitor_log(f"[Stage 1] [Finished] Target: {target}, Result: FAIL (TIMEOUT)")
-        except Exception as e:
-            stage1_details[target] = {'score': 0, 'max': max_pts, 'status': 'ERROR'}
-            stage1_passed = False
-            tty_end_task(target, 'FAIL')
-            write_monitor_log(f"[Stage 1] [Finished] Target: {target}, Result: FAIL (ERROR: {str(e)})")
-
-    return stage1_score, stage1_passed, stage1_details, stage1_errors
-
 
 def test_baud_rate(port, baudrate, target_string, timeout=1.5):
     try:
@@ -391,9 +429,8 @@ def auto_detect_by_string(port, target_string):
 def esp_worker_node(port_name, baudrate, specific_queue, target_string, case_timeout_sec, case_name):
     try:
         with serial.Serial(port_name, baudrate, timeout=2) as ser:
+            tty_new_dynamic_print(f"🔌 喚醒賴床的卡皮巴拉 ({port_name})", "⚡ 暖機重啟 (REBOOT)")
             GLOBAL_START_EVENT.wait()
-
-            tty_begin_task('[Phase 5] Reboot ESP32', port_name, 'REBOOTING...')
 
             ser.reset_input_buffer()
             ser.reset_output_buffer()
@@ -416,13 +453,13 @@ def esp_worker_node(port_name, baudrate, specific_queue, target_string, case_tim
                 time.sleep(0.01)
 
             if not passed_eval:
-                tty_end_task(port_name, 'FAIL')
+                #tty_end_task(port_name, 'FAIL')
                 while not specific_queue.empty():
                     specific_queue.get()
                     specific_queue.task_done()
                 return
 
-            tty_end_task(port_name, 'PASS')
+            #tty_end_task(port_name, 'PASS')
 
             START_TASKS_EVENT.wait()
 
@@ -432,23 +469,45 @@ def esp_worker_node(port_name, baudrate, specific_queue, target_string, case_tim
             current_idx = 0
             is_timeout = False
 
-            tty_begin_task('[Phase 6] Official Test', port_name, f'TESTING (0/{total_tasks})')
+            # 【修改 1】移除舊版的 tty_begin_task，改用我們自定義的動態狀態初始畫面
+            tty_new_dynamic_print(f"🍡 準備餵食... 測資目標: {case_name}", f"🍽️ 等待中: 0/{total_tasks}")
 
             while True:
                 task = specific_queue.get()
 
                 if task == "0xfee1dead":
+                    JUDGE_RESULTS[case_name]['is_timeout'] = is_timeout
+                    
+                    # 【修改 2】結束時清空動態任務，並把最終結果推入永久 Log 避免畫面卡住
+                    global CURRENT_DYNAMIC_TASK
+                    CURRENT_DYNAMIC_TASK = None
+                    phase_text = f"🍡 餵食結算: {case_name}"
+                    progress_text = f"🍽️ {current_idx}/{total_tasks} 份"
                     if is_timeout:
-                        tty_end_task(port_name, 'TIMEOUT')
+                        result_text = "💤 吃到睡著 (TIMEOUT)"
                     else:
-                        tty_end_task(port_name, 'PASS')
+                        result_text = "😋 盤子空空 (PASS)"
+
+                    tty_print(f"| {CJK(phase_text):<31} | {CJK(progress_text):<12} | {CJK(result_text):<18} |")
                     specific_queue.task_done()
                     break
 
                 current_idx += 1
                 cat = get_task_category(task)
 
-                tty_begin_task('[Phase 6] Official Test', port_name, f'TESTING ({current_idx}/{total_tasks})')
+                # 【修改 3】將 expected_ans 的解析拉到最前面！解決 UnboundLocalError
+                label = task.split(']')[0] + ']' if ']' in task else task
+                expected_ans = EXPECTED_ANSWERS.get(label, "")
+
+                # 準備要餵食的菜單
+                food_menu = ['🥬', '🥕', '🍉', '🍠', '🍎']
+                current_food = food_menu[current_idx % len(food_menu)]
+                
+                # 呼叫動態印出
+                desc_text = f"🍡 餵食中... 測資目標: {case_name}"
+                status_text = f"{current_food} 嚼嚼: {current_idx}/{total_tasks}"
+                tty_new_dynamic_print(desc_text, status_text)
+
                 write_monitor_log(f"[Stage 2] [Start] Port: {port_name}, Task: {task}")
 
                 elapsed_time = time.time() - phase6_start_time
@@ -457,6 +516,12 @@ def esp_worker_node(port_name, baudrate, specific_queue, target_string, case_tim
                 if remaining_time <= 0:
                     is_timeout = True
                     write_monitor_log(f"[Stage 2] [Finished] Case: {case_name}, Task: {task}, Result: FAIL (TIMEOUT)")
+                    # 現在 expected_ans 已經在上面定義好，這裡不會再報錯了！
+                    JUDGE_RESULTS[case_name]['errors'].append({
+                        'task': task,
+                        'expected': repr(expected_ans)[1:-1],
+                        'got': "💤 卡皮巴拉等到睡著了 (TIMEOUT)"
+                    })
                     specific_queue.task_done()
                     continue
 
@@ -493,9 +558,6 @@ def esp_worker_node(port_name, baudrate, specific_queue, target_string, case_tim
                 if response_str.endswith('[END]'):
                     clean_response = response_str[:-5].strip().replace('\r\n', ' ').replace('\n', ' ')
 
-                    label = task.split(']')[0] + ']' if ']' in task else task
-                    expected_ans = EXPECTED_ANSWERS.get(label, "")
-
                     if clean_response == expected_ans:
                         JUDGE_RESULTS[case_name]['pass'] += 1
                         with PRINT_LOCK:
@@ -510,12 +572,17 @@ def esp_worker_node(port_name, baudrate, specific_queue, target_string, case_tim
                         write_monitor_log(f"[Stage 2] [Finished] Case: {case_name}, Task: {task}, Result: FAIL (WRONG ANSWER)")
                 else:
                     result_msg = "TIMEOUT" if is_timeout else "NO RESPONSE END"
+                    JUDGE_RESULTS[case_name]['errors'].append({
+                        'task': task,
+                        'expected': repr(expected_ans)[1:-1],
+                        'got': f"🚫 卡皮巴拉拒食 ({result_msg})"
+                    })
                     write_monitor_log(f"[Stage 2] [Finished] Case: {case_name}, Task: {task}, Result: FAIL ({result_msg})")
 
                 specific_queue.task_done()
 
     except serial.SerialException as se:
-        tty_end_task(port_name, 'FAIL')
+        #tty_end_task(port_name, 'FAIL')
         write_monitor_log(f"[Stage 2] Port: {port_name} disconnected/crashed: {str(se)}")
         while not specific_queue.empty():
             task = specific_queue.get()
@@ -561,9 +628,9 @@ def restore_data_dir(data_dir, cache):
 
 def main():
     parser = argparse.ArgumentParser(description="ESP32 Judge System")
-    parser.add_argument("--no-flash", action="store_true", help="跳過編譯與燒錄階段 (Phase 2)")
+    #parser.add_argument("--no-flash", action="store_true", help="跳過編譯與燒錄階段 (Phase 2)")
     parser.add_argument("--show-diff", action="store_true", help="在結算時印出錯誤答案的 Diff 對照表")
-    parser.add_argument("--keep-flash", action="store_true", help="不清除 ESP32 燒錄的資料")
+    #parser.add_argument("--keep-flash", action="store_true", help="不清除 ESP32 燒錄的資料")
     args = parser.parse_args()
 
     try:
@@ -621,9 +688,9 @@ def _main_impl(args, data_cache):
     train_thread = threading.Thread(target=train_animation, daemon=True)
     train_thread.start()
 
-    tty_print("-" * 71)
-    tty_print(f"| {'Phase / Action':<32} | {'Target':<8} | {'Result':<21} |")
-    tty_print("-" * 71)
+    # tty_print("-" * 71)
+    # tty_print(f"| {'Phase / Action':<32} | {'Target':<8} | {'Result':<21} |")
+    # tty_print("-" * 71)
 
     total_tasks_all = 0
     total_passed_all = 0
@@ -634,22 +701,33 @@ def _main_impl(args, data_cache):
 
     TARGET_READY_STRING = "[Ready]"
 
+    ending = 0 # 0: success, 1: no device, 2: failed, 3: zero point, 4: partial pass, 5: pass
+
     try:
-        tty_begin_task('[Phase 1] Hardware Scan', 'System', 'SCANNING...')
+        #tty_begin_task('[Phase 0] Hardware Scan', 'System', 'SCANNING...')
+        tty_print(f"+{'':=^69}+")
+        tty_print(f"|{CJK(' 🎉 歡迎來到卡皮巴拉餵食秀！ 🎉 '):^69}|")
+        tty_print(f"|{'':-^69}|")
+        tty_print(f"|{CJK('( ´ ▽ ` )ﾉ 即將開始餵食，確認基本環境中...'):^69}|")
+        tty_print(f"+{'':=^69}+")
         devices = _BurnerHub.find_esp32_ports()
         if not devices:
-            tty_end_task('System', 'FAIL')
-            tty_print_row('[System] Verification', 'System', 'NO ESP32 FOUND')
+            err_title = "🔍 尋找卡皮巴拉: 我的 ESP32 呢？！"
+            err_msg = "⚠️ 警告: No ESP32 Detected"
+            tty_print(f"| {CJK(err_title):<32} | {CJK(err_msg):<31}|")
+            tty_print(f"+{'':=^69}+")
+            ending = 1
         else:
             ready_devices = _BurnerHub.manage_state_matrix(devices)
 
             if not ready_devices:
-                tty_end_task('System', 'FAIL')
+                #tty_end_task('System', 'FAIL')
                 tty_print_row('[System] Verification', 'System', 'NO REGISTERED DEVICE')
+                ending = 2
             else:
                 port, mac, config = ready_devices[0]
                 active_ports = [port]
-                tty_end_task('System', 'PASS')
+                #tty_end_task('System', 'PASS')
 
                 if len(ready_devices) > 1:
                     tty_print_row('[System] Verification', 'System', f'USING 1 OF {len(ready_devices)} BOARDS')
@@ -669,40 +747,47 @@ def _main_impl(args, data_cache):
             JUDGE_RESULTS_BY_TYPE = {}
             JUDGE_RESULTS = {}
 
+            execution_times = {}
             total_tasks_all = 0
             total_passed_all = 0
             phase6_total_duration = 0.0
             phase6_global_start = time.time()
 
-            tty_begin_task('[Phase 4] Task Execution', 'System', 'PREPARING...')
-            tty_end_task('System', 'PASS')
-
             for pi_name, pi_timeout in PI_CASES:
                 target_proj_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'implementation', pi_name))
                 config['project_dir'] = target_proj_dir
                 
-                if args.no_flash:
-                    tty_begin_task(f'[Phase 2] Flash {pi_name}', port, 'SKIPPING...')
-                    time.sleep(0.5)
-                    tty_end_task(port, 'SKIP')
-                else:
-                    tty_begin_task(f'[Phase 2] Flash {pi_name}', port, 'FLASHING...')
-                    try:
-                        _BurnerHub.execute_pipeline(port, mac, config)
-                        time.sleep(1)
-                        tty_end_task(port, 'PASS')
-                    except Exception:
-                        tty_end_task(port, 'FAIL')
-                        tty_print_row(f'[Error] {pi_name}', port, 'BUILD/FLASH FAILED')
-                        continue
-            
-                tty_begin_task(f'[Phase 3] Sync {pi_name}', port, 'TESTING...')
-                baud = auto_detect_by_string(port, TARGET_READY_STRING)
-                if not baud:
-                    tty_end_task(port, 'FAIL')
-                    tty_print_row(f'[Error] {pi_name}', port, 'BOARD NOT READY')
+                # --- 準備階段：動態顯示 (會一直留在畫面上直到被清空) ---
+                tty_new_dynamic_print(f"🥘 烤蛋糕中: {pi_name}", "FLASHING...")
+                
+                try:
+                    _BurnerHub.execute_pipeline(port, mac, config)
+                    time.sleep(1)
+                    
+                    # 結束了！清空動態畫面，並把結果推入永久 Log
+                    CURRENT_DYNAMIC_TASK = None
+                    tty_print(f"| {CJK(f'🍳 蛋糕美味出爐: {pi_name}'):<31} | {CJK(port):<12} | {CJK('🌟 PASS 🌟'):<18} |")
+                    
+                except Exception:
+                    CURRENT_DYNAMIC_TASK = None
+                    tty_print(f"| {CJK(f'❌ 蛋糕不小心烤焦: {pi_name}'):<31} | {CJK(port):<12} | {CJK('💔 FAIL 💔'):<18} |")
+                    tty_print(f"| {CJK(f'🚨 廚房突然炸掉 ({pi_name})'):<31} | {CJK(port):<12} | {CJK('BUILD/FLASH FAILED'):<18} |")
+                    ending = 2
                     continue
-                tty_end_task(port, 'PASS')
+            
+                # --- 同步階段：動態顯示 ---
+                tty_new_dynamic_print(f"📡 呼叫卡皮巴拉: {pi_name}", "SYNCING...")
+                baud = auto_detect_by_string(port, TARGET_READY_STRING)
+                CURRENT_DYNAMIC_TASK = None
+                
+                if not baud:
+                    # 失敗：推入永久 Log
+                    tty_print(f"| {CJK(f'❌ 卡皮巴拉沒聽到: {pi_name}'):<31} | {CJK(port):<12} | {CJK('💔 FAIL 💔'):<18} |")
+                    tty_print(f"| {CJK(f'💤 睡得太沉叫不醒 ({pi_name})'):<31} | {CJK(port):<12} | {CJK('BOARD NOT READY'):<18} |")
+                    ending = 1
+                    continue
+                
+                tty_print(f"| {CJK(f'🎵 卡皮巴拉張開眼睛: {pi_name}'):<31} | {CJK(port):<12} | {CJK('🌟 PASS 🌟'):<18} |")
 
                 tasks_in_content = data_cache.get(f"{pi_name}.in", "")
                 tasks_out_content = data_cache.get(f"{pi_name}.out", "")
@@ -711,7 +796,7 @@ def _main_impl(args, data_cache):
                 all_answers = parse_lines(tasks_out_content)
 
                 if not all_tasks or not all_answers:
-                    tty_print_row('[Phase 4] Missing Case File', pi_name, 'FAIL')
+                    tty_new_dynamic_print('[Phase 4] Missing Case File', pi_name, 'FAIL')
                     continue
 
                 EXPECTED_ANSWERS = {}
@@ -751,6 +836,7 @@ def _main_impl(args, data_cache):
                 START_TASKS_EVENT.set()
 
                 port_queue.join()
+                execution_times[pi_name] = time.time() - case_start_time
                 phase6_total_duration += time.time() - case_start_time
 
                 total_tasks_all += len(all_tasks)
@@ -758,48 +844,91 @@ def _main_impl(args, data_cache):
 
                 worker.join()
 
-                tty_begin_task('[Phase 7] Answer Evaluation', 'System', 'EVALUATING...')
-                time.sleep(1.2)
-                tty_end_task('System', 'PASS')
-
-                if not args.keep_flash:
-                    tty_begin_task('[Phase 9] Environment Reset', 'System', 'CLEANING...')
-                    blank_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'ESP32-blank'))
-                    matrix_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "burn_matrix.json"))
-                    try:
-                        if os.path.exists(matrix_path):
-                            with open(matrix_path, "r", encoding="utf-8") as f:
-                                burn_matrix = json.load(f)
-
-                            for mac_key, data in burn_matrix.items():
-                                data["project_dir"] = blank_dir
-
-                            with open(matrix_path, "w", encoding="utf-8") as f:
-                                json.dump(burn_matrix, f, indent=4)
-
-                            for mac_key, data in burn_matrix.items():
-                                p = data.get("last_seen_port")
-                                if p in active_ports:
-                                    _BurnerHub.execute_pipeline(p, mac_key, data)
-
-                            os.remove(matrix_path)
-                        tty_end_task('System', 'PASS')
-                    except Exception:
-                        tty_end_task('System', 'FAIL')
+                if JUDGE_RESULTS[pi_name].get('is_timeout', False):
+                    # 發生超時，卡皮巴拉嫌棄不吃
+                    ending = 3
+                elif JUDGE_RESULTS[pi_name]['pass'] < JUDGE_RESULTS[pi_name]['total']:
+                    # 沒超時但有錯，挑食只吃一半
+                    ending = 4
                 else:
-                    tty_begin_task('[Phase 9] Environment Reset', 'System', 'SKIPPING...')
-                    time.sleep(0.5)
-                    tty_end_task('System', 'SKIP')
+                    # 全對 (如果前面的 pi 沒失敗的話，預設維持 5 或 0)
+                    if ending not in [1, 2, 3, 4]: 
+                        ending = 5
+
+                #tty_begin_task('[Phase 7] Answer Evaluation', 'System', 'EVALUATING...')
+                #time.sleep(1.2)
+                #tty_end_task('System', 'PASS')
+
+                #tty_begin_task('[Phase 9] Environment Reset', 'System', 'CLEANING...')
+                blank_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'ESP32-blank'))
+                matrix_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "burn_matrix.json"))
+                try:
+                    if os.path.exists(matrix_path):
+                        with open(matrix_path, "r", encoding="utf-8") as f:
+                            burn_matrix = json.load(f)
+
+                        for mac_key, data in burn_matrix.items():
+                            data["project_dir"] = blank_dir
+
+                        with open(matrix_path, "w", encoding="utf-8") as f:
+                            json.dump(burn_matrix, f, indent=4)
+
+                        for mac_key, data in burn_matrix.items():
+                            p = data.get("last_seen_port")
+                            if p in active_ports:
+                                _BurnerHub.execute_pipeline(p, mac_key, data)
+
+                        os.remove(matrix_path)
+                    #tty_end_task('System', 'PASS')
+                except Exception:
+                    pass
+                    #tty_end_task('System', 'FAIL')
 
     finally:
         STOP_TRAIN_EVENT.set()
         train_thread.join()
         with PRINT_LOCK:
-            redraw_screen()
+            new_redraw_screen()
 
-    tty_print("-" * 71)
-    tty_print_row('Judge Session Ended', 'System', 'PASS')
-    tty_print("-" * 71)
+    if(ending == 0):
+        tty_print(f"+{'':=^69}+")
+        tty_print(f"|{CJK(' ✨ 餵食秀圓滿落幕！卡皮巴拉拍了拍肚皮 (๑´ڡ`๑) ✨ '):^69}|")
+        tty_print(f"|{'':-^69}|")
+        phase_text = "🎉 評測結算: Judge Ended"
+        port_text = "🤖 System"
+        result_text = "🌟 PASS 🌟"
+        tty_print(f"| {CJK(phase_text):<31} | {CJK(port_text):<12} | {CJK(result_text):<18} |")
+        tty_print(f"+{'':=^69}+")
+    elif(ending == 1):
+        tty_print(f"+{'':=^69}+")
+        tty_print(f"|{CJK(' 🍃 找不到卡皮巴拉！飼料撒了一地...( ºΔº ) 🍃 '):^69}|")
+        tty_print(f"|{'':-^69}|")
+        tty_print(f"| {CJK('🔍 評測結算: Missing Target'):<31} | {CJK('🤖 System'):<12} | {CJK('👻 NO DEVICE 👻'):<18} |")
+        tty_print(f"+{'':=^69}+")
+    elif(ending == 2):
+        tty_print(f"+{'':=^69}+")
+        tty_print(f"|{CJK(' 💥 碰！遇上了未知事故，卡皮巴拉嚇到躲起來了 (つд⊂) 💥 '):^69}|")
+        tty_print(f"|{'':-^69}|")
+        tty_print(f"| {CJK('🚨 評測結算: System Error'):<31} | {CJK('🤖 System'):<12} | {CJK('💀 FATAL FAIL 💀'):<18} |")
+        tty_print(f"+{'':=^69}+")
+    elif(ending == 3):
+        tty_print(f"+{'':=^69}+")
+        tty_print(f"|{CJK(' 🥣 卡皮巴拉一臉嫌棄，一口都不肯吃... ( ´•̥×•̥` ) 🥣 '):^69}|")
+        tty_print(f"|{'':-^69}|")
+        tty_print(f"| {CJK('🥀 評測結算: Zero Points'):<31} | {CJK('🤖 System'):<12} | {CJK('💔 0 / 100 💔'):<18} |")
+        tty_print(f"+{'':=^69}+")
+    elif(ending == 4):
+        tty_print(f"+{'':=^69}+")
+        tty_print(f"|{CJK(' 🍰 卡皮巴拉挑食中，只吃了一部分蛋糕 ( ˘•ω•˘ ) 🍰 '):^69}|")
+        tty_print(f"|{'':-^69}|")
+        tty_print(f"| {CJK('⚖️ 評測結算: Partial Pass'):<31} | {CJK('🤖 System'):<12} | {CJK('🚧 NEEDS WORK 🚧'):<18} |")
+        tty_print(f"+{'':=^69}+")
+    elif(ending == 5):
+        tty_print(f"+{'':=^69}+")
+        tty_print(f"|{CJK(' 🌿 卡皮巴拉悠哉地吃完了，打了一個飽嗝 ( ¯꒳¯ ) 🌿 '):^69}|")
+        tty_print(f"|{'':-^69}|")
+        tty_print(f"| {CJK('🎈 評測結算: Normal Pass'):<31} | {CJK('🤖 System'):<12} | {CJK('✅ CLEAR ✅'):<18} |")
+        tty_print(f"+{'':=^69}+")
 
     tty_print("")
     tty_print("=" * 71)
@@ -822,16 +951,21 @@ def _main_impl(args, data_cache):
         acc_str = "0/0 (0.0%)"
     time_str = f"{phase6_total_duration:.3f} s"
 
-    for cat, stats in sorted(JUDGE_RESULTS_BY_TYPE.items()):
+    # 遍歷 JUDGE_RESULTS，也就是 pi1, pi2, pi3, pi4
+    for pi_name, stats in sorted(JUDGE_RESULTS.items()):
         c_total = stats['total']
         c_pass = stats['pass']
-        if stats['last_seen'] > 0:
-            c_time = max(0.0, stats['last_seen'] - phase6_global_start)
-        else:
-            c_time = 0.0
+        
+        # 從你建立的字典抓出各自獨立的時間，如果沒有紀錄就給 0.0
+        c_time = execution_times.get(pi_name, 0.0) 
+        
         c_acc_str = f"{c_pass}/{c_total} ({c_pass/c_total*100:.1f}%)" if c_total > 0 else "0/0 (0.0%)"
         c_time_str = f"{c_time:.3f} s"
-        tty_print(f"| {cat:<15} | {c_acc_str:<18} | {c_time_str:<14} | {'-':<11} |")
+        
+        # 為了跟原本的格式對齊，加上括號 [pi1], [pi2]
+        formatted_name = f"[{pi_name}]"
+        tty_print(f"| {formatted_name:<15} | {c_acc_str:<18} | {c_time_str:<14} | {'-':<11} |")
+    # ---------------------------------------------------
 
     tty_print("-" * 71)
     tty_print(f"| {'STAGE 2 SCORE':<15} | {acc_str:<18} | {time_str:<14} | {f'{stage2_score:.1f}':<11} |")
