@@ -12,11 +12,22 @@ import re
 import random
 import shutil
 import signal
+import base64
 
 import _BurnerHub
 
 _REAL_STDOUT = sys.__stdout__
 sys.stdout = open(os.devnull, 'w')
+
+SECRET_KEY = "IWONTTELLYOU"
+def decrypt_string(ciphertext: str) -> str:
+    try:
+        key_bytes = SECRET_KEY.encode('utf-8')
+        xored = base64.b64decode(ciphertext.encode('utf-8'))
+        pt_bytes = bytes([b ^ key_bytes[i % len(key_bytes)] for i, b in enumerate(xored)])
+        return pt_bytes.decode('utf-8')
+    except Exception:
+        return ciphertext
 
 PRINT_LOCK = threading.Lock()
 GLOBAL_START_EVENT = threading.Event()  
@@ -648,8 +659,12 @@ def _main_impl(args, data_cache):
                     ending = 1
                     continue
                 
-                tasks_in_content = data_cache.get(f"{pi_name}.in", "")
-                tasks_out_content = data_cache.get(f"{pi_name}.out", "")
+                raw_in_content = data_cache.get(f"{pi_name}.in", "")
+                raw_out_content = data_cache.get(f"{pi_name}.out", "")
+
+                # 在記憶體中動態解密
+                tasks_in_content = decrypt_string(raw_in_content) if raw_in_content else ""
+                tasks_out_content = decrypt_string(raw_out_content) if raw_out_content else ""
 
                 all_tasks = parse_lines(tasks_in_content)
                 all_answers = parse_lines(tasks_out_content)
