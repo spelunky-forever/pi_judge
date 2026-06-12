@@ -22,20 +22,7 @@ void run_pi(const char* tag, const char* payload) {
         // 從壓縮的二進位檔案讀取並解碼 BCD 格式。
         // 提示：請善用位元移位 (>> 4) 取得高位元，並使用位元 AND (& 0x0F) 取得低位元。
         
-        int start_idx = N - 1;
-        int end_idx = M - 1;
         
-        for (int i = start_idx; i <= end_idx; i++) {
-            uint8_t byte_val = pi_data_bin_start[i / 2];
-            
-            if (i % 2 == 0) {
-                char digit = '0' + (byte_val >> 4);
-                Serial.print(digit);
-            } else {
-                char digit = '0' + (byte_val & 0x0F);
-                Serial.print(digit);
-            }
-        }
         
         // End of TODO
         

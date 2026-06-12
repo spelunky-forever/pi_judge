@@ -19,20 +19,7 @@ void run_pi(const char* tag, const char* payload) {
         // 測試資料非常龐大，逐字使用 Serial.print() 會導致 Time-out 逾時。
         // 請將解碼後的 BCD 字元存入緩衝區，滿了再一次用 Serial.write() 批次送出。
         
-        int start_idx = N - 1;
-        int end_idx = M - 1;
         
-        for (int i = start_idx; i <= end_idx; i++) {
-            uint8_t byte_val = pi_data_bin_start[i / 2];
-            char digit = (i % 2 == 0) ? ('0' + (byte_val >> 4)) : ('0' + (byte_val & 0x0F));
-            
-            out_buf[buf_idx++] = digit;
-            
-            if (buf_idx >= 2000) {
-                Serial.write((const uint8_t*)out_buf, buf_idx);
-                buf_idx = 0;
-            }
-        }
 
         // End of TODO
         

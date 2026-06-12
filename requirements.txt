@@ -1,0 +1,4 @@
+platformio
+cmake
+esptool
+pyserial

@@ -20,15 +20,7 @@ void run_pi(const char* tag, const char* payload) {
         // Calculate the start and ending index, and print the corresponding digits of pi from the data restore in pi_data_txt.
         // 計算起始與結束的索引，並從 pi_data_txt 中印出對應的 pi 位數字。
         
-        int start_idx = N - 1;
-        int end_idx = M - 1;
         
-        int max_len = pi_data_txt_end - pi_data_txt_start;
-        if (end_idx >= max_len) end_idx = max_len - 1;
-
-        for (int i = start_idx; i <= end_idx; i++) {
-            Serial.print((char)pi_data_txt_start[i]);
-        }
 
         // End of TODO
         
