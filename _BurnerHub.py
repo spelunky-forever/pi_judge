@@ -226,7 +226,8 @@ def execute_pipeline(port, mac, config):
 
     try:
         print("-" * 40)
-        subprocess.run(cmd, cwd=proj_dir, check=True)
+        subprocess.run(cmd, cwd=proj_dir, check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         print("-" * 40)
         print(f"[OK] Build & Flash sequence complete for [MAC: {mac}] (Exit-Zero)!\n")
     except subprocess.CalledProcessError as e:
